@@ -1,0 +1,2 @@
+Lingua rilevata: it
+[0.00s -> 2.00s]  Ieri ha piovuto tutto il giorno.

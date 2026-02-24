@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.db
+*.sqlite
+*.log
+.vscode/
+data/audio/
+data/sessions/

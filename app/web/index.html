@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Cognitive Screening — Web App (MVP)</title>
+  <style>
+    body {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  margin: 24px auto;
+  max-width: 900px;
+  padding: 0 12px;
+  background: linear-gradient(135deg, #e8f1f8, #d6e6f2);
+}
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; background: #fafafa; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .card { border: 1px solid #eee; border-radius: 14px; padding: 14px; margin-top: 14px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 13px; }
+    .label { color: #555; font-size: 13px; margin-bottom: 6px; }
+    audio { width: 100%; margin-top: 8px; }
+
+        /* ===== Chat UI ===== */
+    .chat {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 12px;
+      height: 420px;                
+      overflow-y: auto;
+      padding: 14px;
+      border: 1px solid rgba(0,0,0,0.08);
+      border-radius: 16px;
+      background: white;
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.04);
+    }
+   .msg {
+      max-width: 75%;
+      padding: 10px 12px;
+      border-radius: 16px;
+      border: 1px solid rgba(0,0,0,0.06);
+      background: #ffffff;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: #eaf2ff;
+    }
+    .msg.assistant {
+      align-self: flex-start;
+      background: #ffffff;
+    }
+    .msg .meta { font-size: 12px; color: #666; margin-bottom: 6px; }
+    .msg audio { width: 100%; margin-top: 8px; }
+
+    /* ===== Chat inline loading ===== */
+    .msg.loading {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 6px;
+    }
+
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 3px solid rgba(0,0,0,0.15);
+      border-top-color: rgba(44, 123, 229, 1);
+      animation: chatspin 0.8s linear infinite;
+      flex: 0 0 auto;
+    }
+
+    @keyframes chatspin {
+      to { transform: rotate(360deg); }
+    }
+
+
+
+
+  </style>
+</head>
+<body>
+  <h1>AI Cognitive Screening — Web App (MVP)</h1>
+
+  <div class="card">
+    <div class="row">
+      <button id="btnStart"> Inizia test</button>
+      <button id="btnStopAll" disabled> Stop</button>
+      <span class="mono">stato: <span id="status">idle</span></span>
+    </div>
+
+    <div class="mono">session_id: <span id="sessionId">—</span></div>
+  </div>
+
+   <div class="card">
+  <div class="label">Chat</div>
+
+  <!-- piccolo debug per silence detection (evita null) -->
+  <div class="mono">silence: <span id="silenceInfo">—</span></div>
+
+  <div id="chat" class="chat"></div>
+
+  <!-- elementi tecnici nascosti (evitano null nel JS e servono per audio blob) -->
+  <div style="display:none">
+    <div id="questionText"></div>
+    <div id="transcriptText"></div>
+    <div id="systemText"></div>
+    <audio id="userAudio"></audio>
+  </div>
+  </div>
+
+
+  <!-- Audio tecnici usati per autoplay (li teniamo ma li nascondiamo) -->
+  <audio id="systemQuestionAudio" controls style="display:none"></audio>
+  <audio id="systemReplyAudio" controls style="display:none"></audio>
+
+  
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+ 
+
+  function clearChat() {
+    $("chat").innerHTML = "";
+  }
+
+  function addChatMessage(role, text, audioSrc) {
+    const wrap = document.createElement("div");
+    wrap.className = `msg ${role}`;
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = role === "user" ? "Paziente" : "Sistema";
+
+    const content = document.createElement("div");
+    content.textContent = text ?? "";
+
+    wrap.appendChild(meta);
+    wrap.appendChild(content);
+
+    if (audioSrc) {
+      const a = document.createElement("audio");
+      a.controls = true;
+      a.src = audioSrc;
+      wrap.appendChild(a);
+    }
+
+    $("chat").appendChild(wrap);
+    // autoscroll
+    $("chat").scrollTop = $("chat").scrollHeight;
+  }
+
+  let chatLoadingEl = null;
+
+function showChatLoading(text = "Sto avviando il test...") {
+  if (chatLoadingEl) return; // evita duplicati
+
+  const wrap = document.createElement("div");
+  wrap.className = "msg assistant loading";
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = "Sistema";
+
+  const spinner = document.createElement("div");
+  spinner.className = "spinner";
+
+  const content = document.createElement("div");
+  content.textContent = text;
+
+  wrap.appendChild(meta);
+  wrap.appendChild(spinner);
+  wrap.appendChild(content);
+
+  $("chat").appendChild(wrap);
+  $("chat").scrollTop = $("chat").scrollHeight;
+
+  chatLoadingEl = wrap;
+}
+
+function updateChatLoading(text) {
+  if (!chatLoadingEl) return;
+  // children: [meta, spinner, content]
+  const content = chatLoadingEl.children[2];
+  if (content) content.textContent = text;
+}
+
+function hideChatLoading() {
+  if (!chatLoadingEl) return;
+  chatLoadingEl.remove();
+  chatLoadingEl = null;
+}
+
+
+  // ===== Config "silence detection" =====
+  // Soglia RMS: più bassa = più sensibile, più alta = richiede voce più forte.
+  const SILENCE_RMS_THRESHOLD = 0.02;
+const MIN_RECORDING_MS = 1500; // non fermare mai prima di 2s
+  // Quanto silenzio continuo per considerare "fine risposta"
+  const SILENCE_MS_TO_STOP = 3000;
+  // Dimensione buffer analisi
+  const ANALYSER_FFT_SIZE = 2048;
+  // Limite massimo registrazione (safety)
+  const MAX_RECORDING_MS = 30_000;
+
+  // ===== Stato =====
+  let sessionId = null;
+  let mediaStream = null;
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let recordedBlob = null;
+
+  // WebAudio per silence detection
+  let audioCtx = null;
+  let analyser = null;
+  let sourceNode = null;
+  let rafId = null;
+
+  let silenceStartTs = null;
+  let recordingStartTs = null;
+  let stoppedBySilence = false;
+  let stopAllRequested = false;
+  let skipNextQuestionPlay = false;
+
+  function setStatus(s) { $("status").textContent = s; }
+  function setSilenceInfo(s) { $("silenceInfo").textContent = s; }
+
+  function absUrl(maybeRelative) {
+    if (!maybeRelative) return null;
+
+    // blocca casi "null"/"undefined" come stringhe
+    if (maybeRelative === "null" || maybeRelative === "undefined") return null;
+
+    if (maybeRelative.startsWith("http://") || maybeRelative.startsWith("https://")) return maybeRelative;
+    if (!maybeRelative.startsWith("/")) return null; // evita "null" concatenati strani
+    return window.location.origin + maybeRelative;
+  }
+
+  async function ensureMic() {
+    if (mediaStream) return;
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  }
+
+  async function createSession() {
+    const res = await fetch("/sessions?protocol=mmse_v1&lang=it", { method: "POST" });
+    if (!res.ok) throw new Error("Errore create_session: " + res.status);
+
+    const data = await res.json();
+
+    sessionId = data.session_id;
+    $("sessionId").textContent = sessionId;
+
+    const qUrl = absUrl(data.question_audio_url);
+    if (!qUrl) throw new Error("question_audio_url mancante");
+
+    $("systemQuestionAudio").src = qUrl;
+    addChatMessage("assistant", data.question ?? "—", qUrl);
+
+    return data;
+  }
+
+  function stopAll() {
+    stopAllRequested = true;
+    hideChatLoading(); 
+    try { if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop(); } catch {}
+    cleanupSilenceDetector();
+    setStatus("stopped");
+    $("btnStart").disabled = false;
+    $("btnStopAll").disabled = true;
+  }
+
+  function cleanupSilenceDetector() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+    silenceStartTs = null;
+
+    try { if (sourceNode) sourceNode.disconnect(); } catch {}
+    try { if (analyser) analyser.disconnect(); } catch {}
+    sourceNode = null;
+    analyser = null;
+
+    try { if (audioCtx) audioCtx.close(); } catch {}
+    audioCtx = null;
+  }
+
+  async function playSystemQuestionAuto() {
+    if (skipNextQuestionPlay) {
+      skipNextQuestionPlay = false;
+      return;
+    }
+
+  setStatus("playing_question");
+    const audio = $("systemQuestionAudio");
+    if (!audio.src) return;
+
+    await audio.play();
+
+    await new Promise((resolve) => {
+      const handler = () => {
+        audio.removeEventListener("ended", handler);
+        resolve();
+      };
+      audio.addEventListener("ended", handler);
+    });
+  }
+
+  function setupSilenceDetector() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = ANALYSER_FFT_SIZE;
+
+    sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+    sourceNode.connect(analyser);
+  }
+
+  function computeRms(data) {
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+      const v = (data[i] - 128) / 128;
+      sum += v * v;
+    }
+    return Math.sqrt(sum / data.length);
+  }
+
+  function monitorSilenceAndAutoStop() {
+    const data = new Uint8Array(analyser.fftSize);
+    const loop = () => {
+      if (!mediaRecorder || mediaRecorder.state !== "recording") return;
+
+      analyser.getByteTimeDomainData(data);
+      const rms = computeRms(data);
+
+      const now = performance.now();
+      const recElapsed = now - recordingStartTs;
+
+      // UI debug
+      setSilenceInfo(`rms=${rms.toFixed(3)} | silent_for=${silenceStartTs ? Math.round(now - silenceStartTs) : 0}ms | rec=${Math.round(recElapsed)}ms`);
+
+      // Max duration safety
+      if (recElapsed >= MAX_RECORDING_MS) {
+        stoppedBySilence = false;
+        mediaRecorder.stop();
+        cleanupSilenceDetector();
+        return;
+      }
+
+      if (rms < SILENCE_RMS_THRESHOLD) {
+        if (silenceStartTs === null) silenceStartTs = now;
+        const silentFor = now - silenceStartTs;
+        if (silentFor >= SILENCE_MS_TO_STOP  && recElapsed >= MIN_RECORDING_MS) {
+          stoppedBySilence = true;
+          mediaRecorder.stop();
+          cleanupSilenceDetector();
+          return;
+        }
+      } else {
+        // voce rilevata => reset timer silenzio
+        silenceStartTs = null;
+      }
+
+      rafId = requestAnimationFrame(loop);
+    };
+
+    rafId = requestAnimationFrame(loop);
+  }
+
+  async function startRecordingAuto() {
+    await ensureMic();
+
+    setStatus("recording_user");
+    recordedChunks = [];
+    recordedBlob = null;
+    stoppedBySilence = false;
+
+    // In molti browser: audio/webm (opus) è standard
+    mediaRecorder = new MediaRecorder(mediaStream, { mimeType: "audio/webm" });
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+    };
+
+    const stoppedPromise = new Promise((resolve) => {
+      mediaRecorder.onstop = () => {
+        recordedBlob = new Blob(recordedChunks, { type: "audio/webm" });
+        const url = URL.createObjectURL(recordedBlob);
+        $("userAudio").src = url;
+        resolve();
+      };
+    });
+
+    // Silence detection
+    setupSilenceDetector();
+    recordingStartTs = performance.now();
+    silenceStartTs = null;
+
+    mediaRecorder.start();
+    monitorSilenceAndAutoStop();
+
+    await stoppedPromise;
+
+    setStatus(stoppedBySilence ? "stopped_by_silence" : "stopped_manual_or_timeout");
+  }
+
+ async function sendAnswerAuto() {
+  if (!sessionId) throw new Error("Sessione non creata.");
+  if (!recordedBlob) throw new Error("Nessun audio registrato.");
+
+  setStatus("uploading_answer");
+  showChatLoading("Sto elaborando la tua risposta...");
+
+  try {
+    const form = new FormData();
+    form.append("file", recordedBlob, "answer.webm");
+
+    const res = await fetch(`/sessions/${sessionId}/answer_audio?language=it`, {
+      method: "POST",
+      body: form,
+    });
+
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error("Errore answer_audio: " + res.status + " " + t);
+    }
+
+    const data = await res.json();
+
+    // Messaggio PAZIENTE (trascrizione + audio registrato)
+    addChatMessage(
+      "user",
+      data.transcript ?? "—",
+      $("userAudio").src
+    );
+
+    // Messaggio SISTEMA (testo + audio TTS)
+    const replyUrl = absUrl(data.reply_audio_url);
+
+    // Imposta sempre lo src (se null lo svuota)
+   $("systemReplyAudio").removeAttribute("src");
+   if (replyUrl) $("systemReplyAudio").setAttribute("src", replyUrl);
+
+    addChatMessage(
+      "assistant",
+      data.system_text ?? data.next_question ?? "—",
+      replyUrl
+    );
+
+    return data;
+  } finally {
+    hideChatLoading();
+  }
+}
+
+  async function playSystemReplyAuto() {
+    setStatus("playing_reply");
+    const audio = $("systemReplyAudio");
+    if (!audio.getAttribute("src")) return;    
+    await audio.play();
+    await new Promise((resolve) => {
+      const handler = () => {
+        audio.removeEventListener("ended", handler);
+        resolve();
+      };
+      audio.addEventListener("ended", handler);
+    });
+  }
+
+ 
+async function runOneTurn() {
+  if (stopAllRequested) return { completed: true };
+
+  // 1) play domanda
+  await playSystemQuestionAuto();
+  if (stopAllRequested) return { completed: true };
+
+  // 2) registra utente
+  await startRecordingAuto();
+  if (stopAllRequested) return { completed: true };
+
+  // 3) invia al backend (aggiunge bolle in chat)
+  const data = await sendAnswerAuto();
+  if (stopAllRequested) return { completed: true };
+
+  // 4) play reply del sistema
+  await playSystemReplyAuto();
+  if (stopAllRequested) return { completed: true };
+
+  // 5) prepara la prossima domanda SOLO se non completato
+  if (!data.completed) {
+    $("systemQuestionAudio").src = $("systemReplyAudio").src;
+    skipNextQuestionPlay = true;
+  }
+
+  return data;
+}
+
+
+  async function startTest() {
+    stopAllRequested = false;
+    $("btnStart").disabled = true;
+    $("btnStopAll").disabled = false;
+
+    clearChat();
+    setSilenceInfo("—");
+
+    $("systemQuestionAudio").src = "";
+    $("systemReplyAudio").src = "";
+    $("userAudio").src = "";
+
+    setStatus("creating_session");
+    await ensureMic();
+    
+    showChatLoading("Sto avviando la sessione...");
+    try {
+      await createSession();
+    } finally {
+      hideChatLoading();
+    }
+
+    //continua a far girare turni finché non riceve "completed" dal backend o non viene richiesto stop
+     while (!stopAllRequested) {
+    const data = await runOneTurn();
+
+    if (data.completed) {
+      setStatus("done");
+      $("btnStart").disabled = false;
+      $("btnStopAll").disabled = true;
+
+      // blocca qualunque giro extra
+      stopAllRequested = true;
+      break;
+    }
+    }
+
+    
+  }
+
+  $("btnStart").onclick = () => startTest().catch(err => {
+    alert(err.message);
+    setStatus("error");
+    $("btnStart").disabled = false;
+    $("btnStopAll").disabled = true;
+  });
+
+  $("btnStopAll").onclick = () => stopAll();
+</script>
+</body>
+</html>
