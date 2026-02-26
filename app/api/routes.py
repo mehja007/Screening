@@ -29,9 +29,10 @@ def get_messages(session_id: str):
 
 
 @router.post("/sessions")
-def create_session(protocol: str = "demo_v1", lang: str = "it"):
-    session_id = uuid.uuid4().hex
+def create_session(lang: str = "it"):
+    protocol = "mmse_v1"
 
+    session_id = uuid.uuid4().hex
     session_dir = SESSIONS_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
@@ -42,11 +43,9 @@ def create_session(protocol: str = "demo_v1", lang: str = "it"):
 
     return create_first_question(
         session_id=session_id,
-        protocol=protocol,
         lang=lang,
         session_dir=session_dir,
     )
-
 
 @router.post("/sessions/{session_id}/answer_audio")
 async def answer_audio(session_id: str, file: UploadFile = File(...), language: str = "it"):

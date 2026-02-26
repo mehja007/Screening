@@ -6,18 +6,12 @@ from pathlib import Path
 
 from fastapi import UploadFile, HTTPException
 
+from app.core.paths import SESSIONS_DIR
 from app.core.session_state import append_turn, load_state, save_state, make_turn
 from app.services.asr_whisper import asr_pipeline
 from app.services.llm_ollama import score_with_ollama
-from app.services.tts_qwen import QwenTTSService, TTSConfig
 from app.services.protocols import get_protocol_steps
 from app.repositories.db_repo import db_add_message, db_get_mmse_prompt
-from app.core.paths import SESSIONS_DIR
-
-# Carica una volta sola e riusa
-tts_service = QwenTTSService(TTSConfig())
-
-
 
 
 async def handle_answer_audio(session_id: str, file: UploadFile, language: str = "it") -> dict:
@@ -66,7 +60,7 @@ async def handle_answer_audio(session_id: str, file: UploadFile, language: str =
     out_dir = session_dir / step_out
 
     # 3) Scoring LLM
-    llm_score = score_with_ollama(step.step_id, step.question, transcript_text)
+    llm_score = score_with_ollama(str(state.current_step), step.question, transcript_text)
     (out_dir / "llm_score.json").write_text(
         json.dumps(llm_score, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -95,27 +89,16 @@ async def handle_answer_audio(session_id: str, file: UploadFile, language: str =
     save_state(session_dir, state)
 
     next_question = None
-    next_audio_url = None
+    reply_audio_url = None
 
     if not state.completed:
-        if state.protocol == "mmse_v1":
-            nxt = db_get_mmse_prompt(protocol="mmse_v1", lang=language, step=state.current_step)
-            next_question = nxt.text
-            next_audio_url = f"/assets/{nxt.audio_relpath}"
-        else:
-            next_question = steps[state.current_step].question
+        nxt = db_get_mmse_prompt(protocol="mmse_v1", lang=language, step=state.current_step)
+        next_question = nxt.text
+        reply_audio_url = f"/assets/{nxt.audio_relpath}"
 
-    # 6) Audio risposta sistema
     system_text = next_question if next_question else "Grazie. Il test è terminato."
 
-    if state.protocol == "mmse_v1":
-        reply_audio_url = next_audio_url
-    else:
-        reply_wav_path = out_dir / "system_reply.wav"
-        tts_service.synthesize_to_wav(system_text, reply_wav_path)
-        reply_audio_url = f"/files/{session_id}/{step_out}/system_reply.wav"
-
-    # 7) Persistenza messaggi
+    # 6) Persistenza messaggi
     user_audio_url = f"/files/{session_id}/raw/{input_path.name}"
     db_add_message(session_id, "user", transcript_text, user_audio_url)
     db_add_message(session_id, "assistant", system_text, reply_audio_url)
